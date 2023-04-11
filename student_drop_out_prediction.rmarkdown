@@ -1,0 +1,1800 @@
+---
+title: "merge_and_clean"
+format: html
+editor: visual
+---
+
+# 4050 midterm project
+
+```{r}
+library(tidyverse)
+library(readxl)
+library(ggplot2)
+library(ggpubr)
+library(GGally)
+library(caret)
+library(ISLR2)
+library(tidyverse)
+library(dlookr)
+library(dplyr) 
+library(ggpubr)
+```
+
+# **1. DATASET PREPARATION**
+
+## 1.1 read files and merge:
+
+#### read dropout, test, financial, static, progress and test files
+
+```{r}
+df_label<-read.csv("Student Retention Challenge Data/DropoutTrainLabels.csv")
+df_test<-read.csv("Student Retention Challenge Data/Test Data/TestIDs.csv")
+
+## read financial files
+df_financial <- read_xlsx("Student Retention Challenge Data/Student Financial Aid Data/2011-2017_Cohorts_Financial_Aid_and_Fafsa_Data.xlsx")
+## change colname and prepare for joining
+names(df_financial)[1]="StudentID"
+df_financial$StudentID <- as.numeric(df_financial$StudentID)
+
+## read static file
+static_data <- lapply(Sys.glob("Student Retention Challenge Data/Student Static Data/*.csv"), read.csv)
+## merge static data
+df_static<-static_data%>%bind_rows
+##  remove repeated column
+df_static <- df_static %>% select(-c(Cohort, CohortTerm))
+
+## read progress file
+## Delete static variables & Mark semester and year for variables.
+read_sp_file<-function(year,term,filename){
+  address<-paste("Student Retention Challenge Data/Student Progress Data/",filename,sep="")
+  term_year_SP<-read.csv(address)
+  term_year_SP<-select(term_year_SP,-2:-5)
+  for (i in 2:13){
+    names(term_year_SP)[i]=paste(colnames(term_year_SP)[i],term,year,sep = "_")
+  }
+  return(term_year_SP)
+}
+
+###  read fall
+for (i in 2011:2016){
+  assign(paste("Fall_",i,"_SP",sep=""),read_sp_file(year=i,term="Fall",filename=paste0("Fall ",i,"_SP.csv")))
+  
+}
+### read spring & summer
+for (i in 2012:2017){
+  assign(paste("Spring_",i,"_SP",sep=""),read_sp_file(year=i,term="Spring",filename=paste0("Spring ",i,"_SP.csv")))
+  assign(paste("Sum_",i,"_SP",sep=""),read_sp_file(year=i,term="sum",filename=paste0("Sum ",i,".csv")))
+}
+```
+
+#### merge training set
+
+```{r}
+df_train<-merge(x=df_label,y=df_financial,by="StudentID",all.x=TRUE)
+df_train<-merge(x=df_train,y=df_static,by="StudentID",all.x=TRUE)
+## merge based on Fall, Spring, Summer
+## first merge Fall 2011
+df_train <- merge(x = df_train, y = Fall_2011_SP, by = "StudentID", all.x = TRUE)
+## next merge 2012:2016 Spring, Summer, Fall
+for(i in 2012:2016) {
+  df_train <- merge(x = df_train, y = get(paste0("Spring_", i, "_SP")), by = "StudentID", all.x = TRUE)
+  df_train <- merge(x = df_train, y = get(paste0("Sum_", i, "_SP")), by = "StudentID", all.x = TRUE)
+  df_train <- merge(x = df_train, y = get(paste0("Fall_", i, "_SP")), by = "StudentID", all.x = TRUE)
+}
+## last merge Spring and Summer of 2017
+df_train <- merge(x = df_train, y = Spring_2017_SP, by = "StudentID", all.x = TRUE)
+df_train <- merge(x = df_train, y = Sum_2017_SP, by = "StudentID", all.x = TRUE)
+```
+
+#### merge test set
+
+```{r}
+df_test<-merge(x=df_test,y=df_financial,by="StudentID",all.x=TRUE)
+df_test<-merge(x=df_test,y=df_static,by="StudentID",all.x=TRUE)
+## merge based on Fall, Spring, Summer
+## first merge Fall 2011
+df_test <- merge(x = df_test, y = Fall_2011_SP, by = "StudentID", all.x = TRUE)
+## next merge 2012:2016 Spring, Summer, Fall
+for(i in 2012:2016) {
+  df_test <- merge(x = df_test, y = get(paste0("Spring_", i, "_SP")), by = "StudentID", all.x = TRUE)
+  df_test <- merge(x = df_test, y = get(paste0("Sum_", i, "_SP")), by = "StudentID", all.x = TRUE)
+  df_test <- merge(x = df_test, y = get(paste0("Fall_", i, "_SP")), by = "StudentID", all.x = TRUE)
+}
+## last merge Spring and Summer of 2017
+df_test <- merge(x = df_test, y = Spring_2017_SP, by = "StudentID", all.x = TRUE)
+df_test <- merge(x = df_test, y = Sum_2017_SP, by = "StudentID", all.x = TRUE)
+```
+
+#### split out data to finance, progress and statics
+
+```{r}
+finance_train<-df_train[,1:34]
+progress_train<-df_train[,-(5:66)]
+static_train<-df_train[,c(1:4,35:66)]
+
+finance_test<-df_test[,1:33]
+progress_test<-df_test[,-(4:65)]
+static_test<-df_test[,c(1:3,34:65)]
+```
+
+#### output files
+
+```{r}
+write.csv(progress_test,file="output data/progress_test.csv",row.names = FALSE)
+# write.csv(finance_test,file="output data/financial_test.csv",row.names = FALSE)
+# write.csv(static_test,file="output data/static_test.csv",row.names = FALSE)
+# 
+# write.csv(progress_train,file="output data/progress_train.csv",row.names = FALSE)
+# write.csv(finance_train,file="output data/financial_train.csv",row.names = FALSE)
+# write.csv(static_train,file="output data/static_train.csv",row.names = FALSE)
+```
+
+# **2. DATA CLEANING**
+
+## 2.1 Progress train data clean
+
+```{r}
+progress_train<-read.csv("output data/progress_train.csv")
+financial_train<-read.csv("output data/financial_train.csv")
+static_train<-read.csv("output data/static_train.csv")
+
+progress_train_clean<-progress_train
+```
+
+### 2.1.1 check if na rows
+
+```{r}
+for (i in 0:nrow(progress_train)){
+  if (sum(is.na(progress_train[i,]))>218){
+    print(i)
+  }
+}
+```
+
+It shows that there are no rows with whole role as missing values.
+
+We also want to check if cohort has missing values.
+
+```{r}
+sum(is.na(progress_train_clean[,"cohort"]))
+```
+
+There are also some plot preparation.
+
+```{r}
+progress_train_plot<-progress_train_clean
+progress_train_plot$Dropout = factor(progress_train_plot$Dropout)
+```
+
+### 2.1.2 Complete_Dev_Math & Complete_Dev_English
+
+In the data set, 0 means students are required to take the course but didn't, 1 means they complete it, and -1 means the information is missing. So we decided to create two other variables for Math and English to put on data: 1 means students finished, 0 means otherwise.
+
+```{r}
+progress_train_clean$complete_DevMath=0
+progress_train_clean$complete_DevEnglish=0
+col_DevMath<-grep("CompleteDevMath", colnames(progress_train_clean))
+col_DevEnglish<-grep("CompleteDevEnglish", colnames(progress_train_clean))
+
+progress_train_clean[,col_DevMath][is.na(progress_train_clean[,col_DevMath])] <- "-1"
+progress_train_clean[,col_DevEnglish][is.na(progress_train_clean[,col_DevEnglish])] <- "-1"
+
+for (i in 1:nrow(progress_train_clean)){
+  for (j in col_DevMath){
+    if(progress_train_clean[i,j]==1){
+      progress_train_clean[i,"complete_DevMath"]=1
+    }
+  }
+  for (k in col_DevEnglish){
+    if(progress_train_clean[i,k]==1){
+      progress_train_clean[i,"complete_DevEnglish"]=1
+    }
+  }
+}
+```
+
+### 2.1.3 Major
+
+We change all the missing values in Complete1 and Complete 2 to 0, and CompleteCIP1 to -2.
+
+```{r}
+col_complete12<-grep("Complete1|Complete2", colnames(progress_train_clean))
+col_completeCIP<-grep("CompleteCIP", colnames(progress_train_clean))
+progress_train_clean[,col_complete12][is.na(progress_train_clean[,col_complete12])] <- "0"
+progress_train_clean[,col_completeCIP][is.na(progress_train_clean[,col_completeCIP])] <- "-2"
+```
+
+We also create three more variables as `final_Completed1`, `final_Completed2`, `final_CompleteCIP1`, and `final_CompleteCIP2`.
+
+```{r}
+###### final major
+progress_train_clean$final_Complete1<-0
+col_complete1<-grep("Complete1", colnames(progress_train_clean))
+
+for (i in 1:nrow(progress_train_clean)){
+  for (j in col_complete1){
+    if(progress_train_clean[i,j]>0){
+      progress_train_clean[i,"final_Complete1"]=progress_train_clean[i,j]
+    }
+  }
+}
+
+progress_train_clean$final_Complete2<-0
+col_complete2<-grep("Complete2", colnames(progress_train_clean))
+
+for (i in 1:nrow(progress_train_clean)){
+  for (j in col_complete2){
+    if(progress_train_clean[i,j]>0){
+      progress_train_clean[i,"final_Complete2"]=progress_train_clean[i,j]
+    }
+  }
+}
+
+progress_train_clean$final_CompleteCIP1<-0
+col_completeCIP1<-grep("CompleteCIP1", colnames(progress_train_clean))
+
+for (i in 1:nrow(progress_train_clean)){
+  for (j in col_completeCIP1){
+    if(progress_train_clean[i,j]>0){
+      progress_train_clean[i,"final_CompleteCIP1"]=progress_train_clean[i,j]
+    }
+  }
+}
+
+progress_train_clean$final_CompleteCIP2<-0
+col_completeCIP2<-grep("CompleteCIP2", colnames(progress_train_clean))
+
+for (i in 1:nrow(progress_train_clean)){
+  for (j in col_completeCIP2){
+    if(progress_train_clean[i,j]>0){
+      progress_train_clean[i,"final_CompleteCIP2"]=progress_train_clean[i,j]
+    }
+  }
+}
+
+```
+
+### 2.1.4 TransferIntent
+
+We replace all the missing values in `TransferIntent` to -1.
+
+```{r}
+col_TransferIntent<-grep("TransferIntent", colnames(progress_train_clean))
+progress_train_clean[,col_TransferIntent][is.na(progress_train_clean[,col_TransferIntent])] <- "-1"
+```
+
+### 2.1.5 DegreeTypeSought
+
+We replace all the missing values in `DegreeTypeSought` to -1.
+
+```{r}
+col_DegreeTypeSought<-grep("DegreeTypeSought", colnames(progress_train_clean))
+progress_train_clean[,col_DegreeTypeSought][is.na(progress_train_clean[,col_DegreeTypeSought])] <- "-1"
+```
+
+### 2.1.6 GPA
+
+We created another variable called `final_gpa` to store the students's GPA. We replace all the missing values to -1.
+
+```{r}
+col_GPA<-grep(pattern="GPA", colnames(progress_train_clean))
+progress_train_clean[,col_GPA][is.na(progress_train_clean[,col_GPA])] <- "-1"
+
+col_CumGPA_all<-grep(pattern="CumGPA", colnames(progress_train_clean))
+#add a column of final GPA
+progress_train_clean$final_GPA<-0
+for (i in 1:nrow(progress_train_clean)){
+  for (j in col_CumGPA_all){
+   if(progress_train_clean[i,j]>0){
+     progress_train_clean[i,"final_GPA"]<-progress_train_clean[i,j]
+   }
+  }
+}
+```
+
+### 2.1.7 Output Progress train clean files
+
+```{r}
+# write.csv(progress_train_clean,file="output data/progress_train_clean.csv",row.names = FALSE)
+```
+
+## 2.2 Progress test data clean
+
+For test, we did the same thing as to train.
+
+```{r}
+progress_test<-read.csv("output data/progress_test.csv")
+financial_test<-read.csv("output data/financial_test.csv")
+static_test<-read.csv("output data/static_test.csv")
+
+progress_test_clean<-progress_test
+```
+
+### 2.2.1 check if na rows
+
+```{r}
+for (i in 0:nrow(progress_test)){
+  if (sum(is.na(progress_test[i,]))>218){
+    print(i)
+  }
+}
+```
+
+It shows that there are no rows with whole role as missing values.
+
+We also want to check if cohort has missing values.
+
+```{r}
+sum(is.na(progress_test_clean[,"cohort"]))
+```
+
+Some plots.
+
+```{r}
+progress_test_plot<-progress_test_clean
+```
+
+### 2.2.2 Complete_Dev_Math & Complete_Dev_English
+
+In the data set, 0 means students are required to take the course but didn't, 1 means they complete it, and -1 means the information is missing. So we decided to create two other variables for Math and English to put on data: 1 means students finished, 0 means otherwise.
+
+```{r}
+progress_test_clean$complete_DevMath=0
+progress_test_clean$complete_DevEnglish=0
+col_DevMath<-grep("CompleteDevMath", colnames(progress_test_clean))
+col_DevEnglish<-grep("CompleteDevEnglish", colnames(progress_test_clean))
+
+progress_test_clean[,col_DevMath][is.na(progress_test_clean[,col_DevMath])] <- "-1"
+progress_test_clean[,col_DevEnglish][is.na(progress_test_clean[,col_DevEnglish])] <- "-1"
+
+for (i in 1:nrow(progress_test_clean)){
+  for (j in col_DevMath){
+    if(progress_test_clean[i,j]==1){
+      progress_test_clean[i,"complete_DevMath"]=1
+    }
+  }
+  for (k in col_DevEnglish){
+    if(progress_test_clean[i,k]==1){
+      progress_test_clean[i,"complete_DevEnglish"]=1
+    }
+  }
+}
+```
+
+### 2.2.3 Major
+
+We change all the missing values in Complete1 and Complete 2 to 0, and CompleteCIP1 to -2.
+
+```{r}
+col_complete12<-grep("Complete1|Complete2", colnames(progress_test_clean))
+col_completeCIP<-grep("CompleteCIP", colnames(progress_test_clean))
+progress_test_clean[,col_complete12][is.na(progress_test_clean[,col_complete12])] <- "0"
+progress_test_clean[,col_completeCIP][is.na(progress_test_clean[,col_completeCIP])] <- "-2"
+```
+
+We also create three more variables as `final_Completed1`, `final_Completed2`, `final_CompleteCIP1`, and `final_CompleteCIP2`.
+
+```{r}
+###### final major
+progress_test_clean$final_Complete1<-0
+col_complete1<-grep("Complete1", colnames(progress_test_clean))
+
+for (i in 1:nrow(progress_test_clean)){
+  for (j in col_complete1){
+    if(progress_test_clean[i,j]>0){
+      progress_test_clean[i,"final_Complete1"]=progress_test_clean[i,j]
+    }
+  }
+}
+
+progress_test_clean$final_Complete2<-0
+col_complete2<-grep("Complete2", colnames(progress_test_clean))
+
+for (i in 1:nrow(progress_test_clean)){
+  for (j in col_complete2){
+    if(progress_test_clean[i,j]>0){
+      progress_test_clean[i,"final_Complete2"]=progress_test_clean[i,j]
+    }
+  }
+}
+
+progress_test_clean$final_CompleteCIP1<-0
+col_completeCIP1<-grep("CompleteCIP1", colnames(progress_test_clean))
+
+for (i in 1:nrow(progress_test_clean)){
+  for (j in col_completeCIP1){
+    if(progress_test_clean[i,j]>0){
+      progress_test_clean[i,"final_CompleteCIP1"]=progress_test_clean[i,j]
+    }
+  }
+}
+
+progress_test_clean$final_CompleteCIP2<-0
+col_completeCIP2<-grep("CompleteCIP2", colnames(progress_test_clean))
+
+for (i in 1:nrow(progress_test_clean)){
+  for (j in col_completeCIP2){
+    if(progress_test_clean[i,j]>0){
+      progress_test_clean[i,"final_CompleteCIP2"]=progress_test_clean[i,j]
+    }
+  }
+}
+```
+
+### 2.2.4 TransferIntent
+
+We replace all the missing values in `TransferIntent` to -1.
+
+```{r}
+col_TransferIntent<-grep("TransferIntent", colnames(progress_test_clean))
+progress_test_clean[,col_TransferIntent][is.na(progress_test_clean[,col_TransferIntent])] <- "-1"
+```
+
+### 2.2.5 DegreeTypeSought
+
+We replace all the missing values in `DegreeTypeSought` to -1.
+
+```{r}
+col_DegreeTypeSought<-grep("DegreeTypeSought", colnames(progress_test_clean))
+progress_test_clean[,col_DegreeTypeSought][is.na(progress_test_clean[,col_DegreeTypeSought])] <- "-1"
+```
+
+### 2.2.6 GPA
+
+We created another variable called `final_gpa` to store the students's GPA that comes from a date where its CIP is not 0. If the student has `cum_gpa` as 0, delete this student. We replace all the missing values to -999.
+
+```{r}
+col_GPA<-grep(pattern="GPA", colnames(progress_test_clean))
+progress_test_clean[,col_GPA][is.na(progress_test_clean[,col_GPA])] <- "-999"
+
+col_CumGPA_all<-grep(pattern="CumGPA", colnames(progress_test_clean))
+
+#add a column of final GPA
+progress_test_clean$final_GPA<-0
+for (i in 1:nrow(progress_test_clean)){
+  for (j in col_CumGPA_all){
+    if(progress_test_clean[i,j]>0){
+      progress_test_clean[i,"final_GPA"]<-progress_test_clean[i,j]
+    }
+  }
+}
+```
+
+### 2.2.7 Output Progress train clean files
+
+```{r}
+# write.csv(progress_test_clean,file="output data/progress_test_clean.csv",row.names = FALSE)
+```
+
+## 2.3 Finance & Static train data clean
+
+First, we read the data.
+
+```{r}
+finance_train <- read.csv("output data/financial_train.csv")
+static_train <- read.csv("output data/static_train.csv")
+
+finance_train[finance_train==""] <- NA
+```
+
+### 2.3.1 Loan, Grant
+
+We replace all the na values in `Loan` and `Grant` to.
+
+```{r}
+finance_train[, 11:34][is.na(finance_train[, 11:34])] <- 0
+```
+
+### 2.3.2 Marital.Status, Highest Grade Level, Housing.
+
+We also replace some missing values in the front columns to "Unknown".
+
+```{r}
+finance_train$Marital.Status<-finance_train$Marital.Status %>% replace_na("Unknown")
+finance_train$Father.s.Highest.Grade.Level<-finance_train$Father.s.Highest.Grade.Level %>% replace_na('Unknown')
+finance_train$Mother.s.Highest.Grade.Level<-finance_train$Mother.s.Highest.Grade.Level %>% replace_na('Unknown')
+finance_train$Housing<-finance_train$Housing %>% replace_na('Unknown')
+```
+
+### 2.3.3 Income
+
+We replace some missing values of `income` to 0.
+
+```{r}
+finance_train[,c("Adjusted.Gross.Income","Parent.Adjusted.Gross.Income")][is.na(finance_train[,c("Adjusted.Gross.Income","Parent.Adjusted.Gross.Income")])] <- 0
+```
+
+### 2.3.4 Output files.
+
+```{r}
+static_train<-subset(static_train,select = -c(Zip,Campus,Address1,Address2,City,HSGPAWtd,FirstGen,DualHSSummerEnroll))
+
+#Delete all the rows with missing State
+static_train$State[is.na(static_train$State)] <- 0
+static_train <- static_train[!(static_train$State=="0"),]
+# static_train
+
+# write.csv(finance_train,file="output data/finance_train_clean.csv",row.names = FALSE)
+# write.csv(static_train,file="output data/static_train_clean.csv",row.names = FALSE)
+```
+
+## 2.4 Finance & Static test data clean
+
+For the test set data, we almost do the same thing as train set.
+
+First, we read the data.
+
+```{r}
+finance <- read.csv("output data/financial_test.csv")
+static <- read.csv("output data/static_test.csv")
+
+finance[finance == ""] <- NA
+```
+
+### 2.4.1 Loan, Grant
+
+We replace all the na values in `Loan` and `Grant` to.
+
+```{r}
+finance[, 10:33][is.na(finance[, 10:33])] <- 0
+
+```
+
+### 2.4.2 Marital.Status, Highest Grade Level, Housing.
+
+We also replace some missing values in the front columns to "Unknown".
+
+```{r}
+finance$Marital.Status <- finance$Marital.Status %>% replace_na("Unknown")
+finance$Father.s.Highest.Grade.Level <- finance$Father.s.Highest.Grade.Level %>% replace_na('Unknown')
+finance$Mother.s.Highest.Grade.Level <- finance$Mother.s.Highest.Grade.Level %>% replace_na('Unknown')
+finance$Housing <- finance$Housing %>% replace_na('Unknown')
+```
+
+### 2.4.3 Income
+
+We replace some missing values of `income` to 0.
+
+```{r}
+finance[,c("Adjusted.Gross.Income","Parent.Adjusted.Gross.Income")][is.na(finance[,c("Adjusted.Gross.Income","Parent.Adjusted.Gross.Income")])] <- 0
+```
+
+### 2.4.4 Output files.
+
+```{r}
+static<-subset(static,select = -c(Zip,Campus,Address1,Address2,City,HSGPAWtd,FirstGen,DualHSSummerEnroll))
+
+#Delete all the rows with missing State
+static$State[is.na(static$State)] <- 0
+static <-static[!(static$State=="0"),]
+# static
+
+# write.csv(finance,file="output data/finance_test_clean.csv",row.names = FALSE)
+# write.csv(static,file="output data/static_test_clean.csv",row.names = FALSE)
+```
+
+## 2.5 Final Merge
+
+Finally, we merge all of our files together, which progress train merges with finance & static train, progress test merges with finance & static test.
+
+And because `cohort` and `cohort.Term` seem to be duplicated all the time, so we want to delete them when we are merging files.
+
+```{r}
+df_label<-read.csv("/Users/xinchangliu/Dropbox/Mac/Desktop/untitled folder 2/Student Retention Challenge Data/DropoutTrainLabels.csv")
+df_test<-read.csv("/Users/xinchangliu/Dropbox/Mac/Desktop/untitled folder 2/Student Retention Challenge Data/Test Data/TestIDs.csv")
+
+finance_test_clean<-read.csv("output data/finance_test_clean.csv")
+finance_test_clean$StudentID <- as.numeric(finance_test_clean$StudentID)
+
+static_test_clean<-read.csv("output data/static_test_clean.csv")
+static_test_clean <- static_test_clean %>% select(-c(cohort, cohort.term))
+progress_test_clean<-read.csv("output data/progress_test_clean.csv")
+progress_test_clean <- progress_test_clean %>% select(-c(cohort, cohort.term))
+
+finance_train_clean<-read.csv("output data/finance_train_clean.csv")
+finance_train_clean$StudentID <- as.numeric(finance_train_clean$StudentID)
+finance_train_clean <- finance_train_clean %>% select(-c(Dropout))
+
+static_train_clean<-read.csv("output data/static_train_clean.csv")
+static_train_clean <- static_train_clean %>% select(-c(Dropout,cohort, cohort.term))
+progress_train_clean<-read.csv("output data/progress_train_clean.csv")
+progress_train_clean <- progress_train_clean %>% select(-c(Dropout, cohort, cohort.term))
+
+
+###### merge test set
+df_test_clean<-merge(x=df_test,y=finance_test_clean,by="StudentID",all.x=TRUE)
+df_test_clean<-merge(x=df_test_clean,y=static_test_clean,by="StudentID",all.x=TRUE)
+df_test_clean<-merge(x=df_test_clean,y=progress_test_clean,by="StudentID",all.x=TRUE)
+
+df_train_clean<-merge(x=df_label,y=finance_train_clean,by="StudentID",all.x=TRUE)
+df_train_clean<-merge(x=df_train_clean,y=static_train_clean,by="StudentID",all.x=TRUE)
+df_train_clean<-merge(x=df_train_clean,y=progress_train_clean,by="StudentID",all.x=TRUE)
+
+
+# write.csv(df_test_clean,file="output data/df_test_clean.csv",row.names = FALSE)
+# write.csv(df_train_clean,file="output data/df_train_clean.csv",row.names = FALSE)
+```
+
+---
+title: "EDA-STRUCTURE-ALL"
+format: html
+editor: visual
+---
+
+# 3. EDA AND FEATURE ENGINEERING
+
+## 3.1 Data Wrangling
+
+### 3.1.1 Reading & Merging
+
+```{r}
+test<-read.csv("/Users/xinchangliu/Dropbox/Mac/Desktop/untitled folder 2/output data/df_test_clean.csv")
+train<-read.csv("/Users/xinchangliu/Dropbox/Mac/Desktop/untitled folder 2/output data/df_train_clean.csv")
+test_id <- test[,1] #test里的id
+train_id <- train[,1] #train里的id
+dropput_train <- train[,1:2] #train里的id和dropoutlabel
+df <- bind_rows(select(train,-Dropout),test)
+test_id<-as.data.frame(test_id)
+names(test_id) <- "StudentID"
+```
+
+### 3.1.2 Variable concatenation
+
+Variables such as major, GPA are recorded by year. These variables can not be analysis among all students because they enrolled in different years. So we first transformed them into variables unrelated to a specific year.This operation will be applied to both training and testing data sets
+
+#### **Major**
+
+Since there are major variables repeatedly for each semester, we decided to use the major1 and majors2 of the FIRST and LAST semester only.
+
+```{r}
+################################      Major     ###############################
+
+
+####################### cohort_year ############################
+for (i in 1:nrow(df)){
+  df[i,"cohort_year"]<-substring((df[i,"cohort"]),1,4)
+}
+
+########   first term Major1     #########
+
+col_Major1<-grep("Major1", colnames(df))
+df[,col_Major1][is.na(df[,col_Major1])] <- "-1"
+df[,"first_term_Major1"]<-0
+  
+for (i in 1:nrow(df)){
+  if (df[i,"cohort.term"]==1){
+    df[i,"first_term_Major1"]<-df[i,paste("Major1","Fall",df[i,"cohort_year"],sep="_")]
+  }
+  else if(df[i,"cohort.term"]==3){
+    if(df[i,paste("Major1","Fall",df[i,"cohort_year"],sep="_")]>0){
+      df[i,"first_term_Major1"]<-df[i,paste("Major1","Fall",df[i,"cohort_year"],sep="_")]
+    }
+    else
+      df[i,"first_term_Major1"]<-df[i,paste("Major1","Spring",as.numeric(df[i,"cohort_year"])+1,sep="_")]
+  }
+}
+
+########   first term Major2     #########
+df[,"first_term_Major2"]<-0
+col_Major2<-grep("Major2", colnames(df))
+df[,col_Major2][is.na(df[,col_Major2])] <- "0"
+
+for (i in 1:nrow(df)){
+  if (df[i,"cohort.term"]==1){
+    df[i,"first_term_Major2"]<-df[i,paste("Major2","Fall",df[i,"cohort_year"],sep="_")]
+  }
+  else if(df[i,"cohort.term"]==3){
+    if(df[i,paste("Major2","Fall",df[i,"cohort_year"],sep="_")]>0){
+      df[i,"first_term_Major2"]<-df[i,paste("Major2","Fall",df[i,"cohort_year"],sep="_")]
+    }
+    else
+      df[i,"first_term_Major2"]<-df[i,paste("Major2","Spring",as.numeric(df[i,"cohort_year"])+1,sep="_")]
+  }
+}
+
+########      final_majorOne     #########
+col_final_majorOne<-grep("Major1", colnames(df))
+df[,col_final_majorOne][is.na(df[,col_final_majorOne])] <- "-1"
+
+df$final_majorOne <- -1
+
+for(i in 1:nrow(df)){
+  for(j in col_final_majorOne){
+    if(df[i,j]>=0){
+      df[i,"final_majorOne"]=df[i,j]
+    }
+  }
+}
+
+########      final_majorTwo     #########
+
+col_final_majorTwo<-grep("Major2", colnames(df))
+df[,col_final_majorTwo][is.na(df[,col_final_majorTwo])] <- "-1"
+
+df$final_majorTwo <- -1
+
+for(i in 1:nrow(df)){
+  for(j in col_final_majorTwo){
+    if(df[i,j]>=0){
+      df[i,"final_majorTwo"]=df[i,j]
+    }
+  }
+}
+
+# drop orignally related variables
+df <- df[ , !(grepl( "Major1_|Major2_", names(df)))]
+
+df <- df[ , !(grepl( "Complete1_|Complete2_|CompleteCIP1_|CompleteCIP2_", names(df)))]
+
+df <- df[ , !(grepl( "TermGPA|CumGPA", names(df)))]
+
+df <- df[ , !(grepl( "CompleteDevMath_|CompleteDevEnglish_", names(df)))]
+
+
+```
+
+#### **TransferIntent and DegreeTypeSought**
+
+We also want to extract the final TransferIntent and DegreeTypeSought of the last semeste for each student as well as whether they once have TransferIntent.
+
+```{r}
+########    final_transferIt ###################
+
+col_final_transferIt<-grep("TransferIntent", colnames(df))
+df[,col_final_transferIt][is.na(df[,col_final_transferIt])] <- "-1"
+df$final_transferIt <- -1
+
+for (i in 1:nrow(df)){
+  for (j in col_final_transferIt){
+    if(df[i,j]>=0){
+      df[i,"final_transferIt"]=df[i,j]
+    }
+  }
+}
+###################  final_degreeSought  #############################
+
+col_final_degreeSought<-grep("DegreeTypeSought", colnames(df))
+df[,col_final_degreeSought][is.na(df[,col_final_degreeSought])] <- "-1"
+df$final_degreeSought <- -1
+for (i in 1:nrow(df)){
+  for (j in col_final_degreeSought){
+    if(df[i,j]>=1){
+      df[i,"final_degreeSought"]=df[i,j]
+    }
+  }
+}
+
+###################### once_TransferIntent  ##############################
+
+col_TransferIntent<-grep("TransferIntent", colnames(df))
+df[,col_TransferIntent][is.na(df[,col_TransferIntent])] <- "-2"
+df[,"once_TransferIntent"]=0
+for (i in 1:nrow(df)){
+  for (j in col_TransferIntent){
+    if(df[i,j]>0){
+      df[i,"once_TransferIntent"]=1
+    }
+  }
+}
+
+
+
+# drop orignally related variables
+df <- df[ , !(grepl( "TransferIntent_|DegreeTypeSought_", names(df)))]
+
+```
+
+#### **Loan\|Work.Study\|Grant\|Scholarship**
+
+We have extracted the total amount of each subsidy obtained by students during their college years.
+
+```{r}
+######      Loan|Work.Study|Grant|Scholarship      ###########
+
+for (i in 1:nrow(df)){
+  df$total_Loan[i]<-sum(df[i,grep("\\.Loan", colnames(df))])
+}
+
+for (i in 1:nrow(df)){
+  df$total_Scholarship[i]<-sum(df[i,grep("\\.Scholarship", colnames(df))])
+}
+
+for (i in 1:nrow(df)){
+  df$total_Work_Study[i]<-sum(df[i,grep("\\.Work\\.Study", colnames(df))])
+}
+
+for (i in 1:nrow(df)){
+  df$total_Grant[i]<-sum(df[i,grep("\\.Grant", colnames(df))])
+}
+
+df <- df[ , !(grepl( "\\.Loan|\\.Work.Study|\\.Grant|\\.Scholarship", names(df)))]
+```
+
+We now look at the their distribution: Based on the plots, we can see that after log transformation, the distribution of is less skewed. As a result, we need to do the log transformation on those four variables.
+
+```{r}
+plot_normality(df,total_Loan)
+plot_normality(df,total_Scholarship)
+plot_normality(df,total_Work_Study)
+plot_normality(df,total_Grant)
+
+df$total_Loan <- log10(df$total_Loan)
+df$total_Loan[df$total_Loan=="-Inf"] <- 0 
+df$total_Scholarship <- log10(df$total_Scholarship)
+df$total_Scholarship[df$total_Scholarship=="-Inf"] <- 0 
+df$total_Work_Study <- log10(df$total_Work_Study)
+df$total_Work_Study[df$total_Work_Study=="-Inf"] <- 0 
+df$total_Grant <- log10(df$total_Grant)
+df$total_Grant[df$total_Grant=="-Inf"] <- 0 
+```
+
+#### **Race**
+
+Instead of using seven separate race indicators (which are perfectly correlated), we decided to add a new variable called race to indicate a student's race directly and drop seven indicators.
+
+```{r}
+################################      Race     #############################
+df$race <- ifelse(df$Hispanic==1,"Hispanic", ifelse(df$AmericanIndian==1,"AmericanIndian", ifelse(df$Asian==1,"Asian",ifelse(df$Black==1,"Black", ifelse(df$NativeHawaiian==1,"NativeHawaiian",ifelse(df$White==1,"White",ifelse(df$TwoOrMoreRace==1,"TwoOrMoreRace","nonresident")))))))
+df[which(df$Asian==-1),"race"] <- "Unknown"
+
+# drop original seven race indicators
+df <- df %>% select(-c(Hispanic,AmericanIndian,Asian,Black,NativeHawaiian,White,TwoOrMoreRace))
+```
+
+#### **Income**
+
+We found a negative value in income and we assume that minus sign is due to a mistake. So we first took the absolute value. And according to the table, each income variable has half of the values = 0, we decide to add these two together as an overall income.
+
+```{r}
+###### abs
+df$Adjusted.Gross.Income<-abs(df$Adjusted.Gross.Income)
+df$Parent.Adjusted.Gross.Income<-abs(df$Parent.Adjusted.Gross.Income)
+
+###### overall_income  #############
+df$overall_income <- apply(select(df,c(Adjusted.Gross.Income,Parent.Adjusted.Gross.Income)), 1, sum)
+df$overall_income <- abs(df$overall_income)
+#df <- df %>% select(-c(Adjusted.Gross.Income,Parent.Adjusted.Gross.Income))
+```
+
+Same as financial aid, we look at the distribution: Based on the plots, we can see that after log transformation, the distribution of is less skewed. As a result, we need to do the log transformation.
+
+```{r}
+plot_normality(df,overall_income)
+df$overall_income <- log10(df$overall_income)
+df$overall_income[df$overall_income=="-Inf"] <- 0 
+```
+
+### 3.1.3 Create variables
+
+In this session, we generated some variables based on our perceptual intuition
+
+#### Generate enrollment age
+
+By combining the column of Birth year and cohort term, we can get the age when students start their cohort term in the university. Different age people might have different cerebral function developed level, or deteriorated condition. Especially the students provided comes from a wide range of age group, from 15 to over 60 when they have their first cohort term. But the difference will be more distinguished in comparing different age group than comparing similar ages, so students are divided as different age group by 10 year difference, which is also the difference of generation.
+
+```{r}
+#######################generate enrollment age ############################
+del<-which(is.na(df$"BirthYear"),arr.ind = TRUE)
+df<-df[-del,]
+for (i in 1:nrow(df)){
+  df[i,"enrolled_age"]<-as.numeric(df[i,"cohort_year"])-as.numeric(df[i,"BirthYear"])
+  if(as.numeric(df[i,"cohort_year"])-as.numeric(df[i,"BirthYear"])>100){
+    print(i)
+  }
+}
+
+```
+
+### 3.1.4 Floor and factors
+
+```{r}
+
+##### floor major
+ 
+for (i in c("final_majorOne","final_majorTwo","first_term_Major1","first_term_Major2")){
+  df[,i] <- as.numeric(df[,i])
+  df[,i] <- floor(df[,i])
+}
+
+##### factor 
+
+# # code categorical variables into factors
+# df$cohort <- factor(df$cohort)
+# df$cohort.term <- factor(df$cohort.term, levels=c(1:7), labels=c("Term 1","Term 2","Term 3","Term 4","Term 5","Term 6","Term 7"))
+# df$Marital.Status <- factor(df$Marital.Status)
+# df$Father.s.Highest.Grade.Level <- factor(df$Father.s.Highest.Grade.Level)
+# df$Mother.s.Highest.Grade.Level <- factor(df$Mother.s.Highest.Grade.Level)
+# df$Housing <- factor(df$Housing)
+# df$Gender <- factor(df$Gender, levels=c(1,2,3,-1), labels=c("Male","Female","Other","Missing"))
+# df$HSDip <- factor(df$HSDip, levels=c(0,1,2,3,4,-1), labels=c("None","HighSchoolDiploma","GED","AdultHighSchoolDiploma","Allother","Missing"))
+# df$EnrollmentStatus <- factor(df$EnrollmentStatus,levels=c(1,2,-1),labels=c("EnteringFreshmen","EnteringTransfer","Missing"))
+# df$HighDeg <- factor(df$HighDeg,levels=c(0,1,2,3,4,5,-1),labels=c("None","CertificateUndergrad","Associates","Bachelor","HigherTthanBachelor","Anyother","Missing"))
+# df$MathPlacement <- factor(df$MathPlacement,levels=c(0,1,-1), labels=c("ready","notready","Missing"))
+# df$EngPlacement <- factor(df$EngPlacement,levels=c(0,1,-1), labels=c("ready","notready","Missing"))
+# df$GatewayEnglishStatus <- factor(df$GatewayEnglishStatus,levels=c(0,1,-1), labels=c("notrequired","required","Missing"))
+# df$GatewayMathStatus <- factor(df$GatewayMathStatus,levels=c(0,1,-1), labels=c("notrequired","required","Missing"))
+# df$complete_DevEnglish <- factor(df$complete_DevEnglish,levels=c(0,1),labels=c("notcomplete","complete"))
+# df$complete_DevMath <- factor(df$complete_DevMath,levels=c(0,1),labels=c("notcomplete","complete"))
+# df$race <- factor(df$race)
+# df$final_degreeSought <- factor(df$final_degreeSought, levels=c(1,2,3,4,5,6,-1), labels=c("Nondegree","Lessthan1year","1-2year","2-4 year","Associate","Bachelor","Missing"))
+# df$BirthMonth <- factor(df$BirthMonth)
+# df$State <- factor(df$State)
+# 
+# 
+# df$final_MajorOne <- factor(df$final_majorOne)
+# df$final_MajorTwo <- factor(df$final_majorTwo)
+# df$final_first_term_Major1 <- factor(df$first_term_Major1)
+# df$final_first_term_Major2 <- factor(df$first_term_Major2)
+# 
+# 
+# df$final_Complete1 <- factor(df$final_Complete1)
+# df$final_Complete2 <- factor(df$final_Complete2)
+# df$final_CompleteCIP1 <- factor(df$final_CompleteCIP1)
+# df$final_CompleteCIP2 <- factor(df$final_CompleteCIP2)
+
+
+#df$Dropout = factor(df$Dropout,levels = c(0,1),labels = c("Grad", "dropout"))
+```
+
+### 3.1.5 Check NA and DOESN'T APPLY proporation
+
+Examine which variables have too many missing values (more than 50% )or doesn't apply condition according to the code book.
+
+```{r}
+observations <- nrow(df)
+
+#######################  Continuous Variables  #######################
+for (i in c("HSGPAUnwtd","NumColCredAttemptTransfer","NumColCredAcceptTransfer","CumLoanAtEntry")){
+  if (sum(df[,i]==-1)/observations>0.5){
+  print(paste("na/unknown ratio of",i,sum(df[,i]==-1)/observations))
+  }
+}
+
+for (i in c("Adjusted.Gross.Income","Parent.Adjusted.Gross.Income","overall_income")){
+  if (sum(df[,i]==-1)/observations>0.5){
+  print(paste("na/unknown ratio of",i,sum(df[,i]==0)/observations))
+  }
+}
+
+
+#######################  Discrete variable  #######################
+observations <- nrow(df)
+for (i in c("Marital.Status","Father.s.Highest.Grade.Level","Mother.s.Highest.Grade.Level","Housing","State","Gender","race")){
+  if (sum(df[,i]=="Unknown")/observations>0.5){
+  print(paste("na/unknown ratio of",i,sum(df[,i]=="Unknown")/observations))
+  }
+}
+
+for (i in c("HSDip","EnrollmentStatus","MathPlacement","EngPlacement","GatewayMathStatus","GatewayEnglishStatus")){
+  if (sum(df[,i]=="missing")/observations>0.5){
+  print(paste("na/unknown ratio of",i,sum(df[,i]=="missing")/observations))
+  }
+}
+
+for (i in c("HSDipYr","HighDeg","complete_DevMath","complete_DevEnglish","final_degreeSought","final_transferIt","once_TransferIntent","first_term_Major1","first_term_Major2","final_majorOne","final_majorTwo")){
+  if (sum(df[,i]==-1)/observations>0.5){
+  print(paste("na/unknown ratio of",i,sum(df[,i]==-1)/observations))
+  }
+}
+
+################## drop  ##################
+df <- df %>% select(-HSGPAUnwtd)
+df <- df %>% select(-CumLoanAtEntry)
+df <- df %>% select(-final_transferIt)
+```
+
+#### For Continuous variables have too many missing values, we decide to drop them:
+
+1.  Over 58% of students have missing variable CumLoanAtEntry value.
+2.  Over 70% of students have missing variable HSGPAUnwtd value.
+
+#### For Discrete variables have too many missing values, we would keep them temporarily until we test whether those NA has potential meaning (for example, whether the dropout rate of students recorded as na in some variables is significantly different from that of students with values)（在train中检测）
+
+1.  According to our calculations, over 72% of students have missing variable HSDipYr value.
+
+2.  Over 98% of students have missing variable first_term_major2 value.
+
+Also, variable final_transferIt only contains -1, which refers to missing values, so we drop this feature.
+
+### 3.1.6 Check variables of near zero variance
+
+If a variable has very little change or variation, it's like a constant and not useful for prediction so we would like to drop them.
+
+```{r}
+########## variables of near zero variance
+colnames(df)[nearZeroVar(df)]
+
+########## drop them
+df <- select(df,-colnames(df)[nearZeroVar(df)][1:9])
+```
+
+11 variables with low variances are：
+
+"State", "HSDip", "final_Complete2", "final_CompleteCIP1", "final_CompleteCIP2", "first_term_Major2","final_majorTwo" , "final_degreeSought", "once_TransferIntent", "total_Scholarship", "total_Work_Study"
+
+### 3.1.7 Extract train data set for EDA
+
+```{r}
+train_EDA <- left_join(dropput_train, df, by="StudentID")
+train_EDA$Dropout <- factor(train_EDA$Dropout)
+```
+
+## 3.2 Exploratory Data Analysis & Feature Engineering
+
+### 3.2.1 Interval & Ratio Level Measures（Continuous Variables）:
+
+#### variables overview：
+
+|                              | Static                    | Progress       |
+|------------------------------|---------------------------|----------------|
+| Adjusted.Gross.Income        | BirthYear,                | final_GPA      |
+| Parent.Adjusted.Gross.Income | HSDipYr                   | valid_transfer |
+| overall_income               | NumColCredAcceptTransfer  |                |
+| Scholarship                  | NumColCredAttemptTransfer |                |
+| Work.Study                   | enrolled_age              |                |
+| Grant                        | RegistrationDate          |                |
+| Loan                         |                           |                |
+
+#### Correlation test
+
+Firstly, we conducted a correlation test
+
+```{r}
+
+ggcorr(train_EDA[,c("Adjusted.Gross.Income","Parent.Adjusted.Gross.Income","overall_income","total_Scholarship","total_Work_Study","total_Grant","total_Loan","BirthYear","HSDipYr","NumColCredAcceptTransfer","NumColCredAttemptTransfer","final_GPA")] %>% mutate(dropout=as.integer(train_EDA$Dropout)), method = c("pairwise", "pearson"),    
+    nbreaks = 6,
+    label = TRUE,
+    label_size = 3,
+    color = "grey50")
+
+
+```
+
+Then we look at each variables:
+
+#### Income
+
+```{r}
+
+######  Adjusted.Gross.Income, Parent.Adjusted.Gross.Income, overall_income
+
+###normal distribution test
+ks.test(scale(train_EDA$Adjusted.Gross.Income),"pnorm")
+qqnorm(train_EDA$Adjusted.Gross.Income)
+
+ks.test(scale(train_EDA$Parent.Adjusted.Gross.Income),"pnorm")
+qqnorm(train_EDA$Parent.Adjusted.Gross.Income)
+
+ks.test(scale(train_EDA$overall_income),"pnorm")
+qqnorm(train_EDA$overall_income)
+
+####  Mann-Whitney U test
+wilcox.test(train_EDA$Parent.Adjusted.Gross.Income~train_EDA$Dropout)
+wilcox.test(train_EDA$Adjusted.Gross.Income~train_EDA$Dropout)
+wilcox.test(train_EDA$overall_income~train_EDA$Dropout)
+
+for(i in c("Adjusted.Gross.Income","Parent.Adjusted.Gross.Income","overall_income")){
+print(ggplot(train_EDA, aes(x = get(i), fill = Dropout)) +xlab(i)+geom_density(alpha = 0.3))
+print(ggplot(data = train_EDA, mapping = aes(x = get(i), fill =Dropout)) +xlab(i)+ ylab("perc") + geom_histogram(position="fill",alpha = 0.3))
+}
+```
+
+**Analysis and Main Results:**
+
+None of these three variables are normally distributed, so Wilcoxon rank sum test was conducted and results show that all these three variables are significantly correlated with dropout.
+
+So all these three variables are left and could be further selected (Parent.Adjusted.Gross.Income and Adjusted.Gross.Income, or overall_income) in the model
+
+**Involved variables:**
+
+-   Adjusted.Gross.Income & Parent.Adjusted.Gross.Income \| overall_income (newly generated)
+
+#### Financial aids:
+
+```{r}
+####################Loan|Work.Study|Grant|Scholarship #####################
+
+############  normal distribution test
+ks.test(scale(train_EDA$total_Loan),"pnorm")
+qqnorm(train_EDA$total_Loan)
+
+ks.test(scale(train_EDA$total_Work_Study),"pnorm")
+qqnorm(train_EDA$total_Work_Study)
+
+ks.test(scale(train_EDA$total_Scholarship),"pnorm")
+qqnorm(train_EDA$total_Scholarship)
+
+ks.test(scale(train_EDA$total_Grant),"pnorm")
+qqnorm(train_EDA$total_Grant)
+
+####  Mann-Whitney U test
+wilcox.test(train_EDA$total_Loan~train_EDA$Dropout)
+wilcox.test(train_EDA$total_Scholarship~train_EDA$Dropout)
+wilcox.test(train_EDA$total_Work_Study~train_EDA$Dropout)
+wilcox.test(train_EDA$total_Grant~train_EDA$Dropout)
+
+##### plot
+for(i in c("total_Loan","total_Scholarship","total_Work_Study","total_Grant")){
+print(ggplot(train_EDA, aes(x = (get(i)), fill = Dropout)) +xlab(i)+geom_density(alpha = 0.3))
+print(ggplot(data = train_EDA, mapping = aes(x = get(i), fill =Dropout)) +xlab(i)+ ylab("perc") + geom_histogram(position="fill",alpha = 0.3))
+}
+```
+
+**Analysis and Main Results:**
+
+None of these four variables are normally distributed, so Wilcoxon rank sum test was conducted and results show that all these three variables are significantly correlated with dropout.
+
+So all these four variables are left and could be further selected (Loan\|Work.Study\|Grant\|Scholarship) in the model
+
+**Involved variables:**
+
+-   Loan
+
+-   Work.Study
+
+-   Grant
+
+-   Scholarship
+
+#### BirthYear, HSDipYr, enrolled_age
+
+```{r}
+############  normal distribution test
+ks.test(scale(train_EDA$BirthYear),"pnorm")
+qqnorm(train_EDA$BirthYear)
+
+ks.test(scale(train_EDA$HSDipYr),"pnorm")
+qqnorm(train_EDA$HSDipYr)
+
+ks.test(scale(train_EDA$enrolled_age),"pnorm")
+qqnorm(train_EDA$enrolled_age)
+
+####  Mann-Whitney U test
+wilcox.test(train_EDA$BirthYear~train_EDA$Dropout)
+wilcox.test(train_EDA$HSDipYr~train_EDA$Dropout)
+wilcox.test(train_EDA$enrolled_age~train_EDA$Dropout)
+
+sum(is.na(train_EDA$enrolled_age))
+
+for(i in c("BirthYear","HSDipYr","enrolled_age")){
+print(ggplot(train_EDA, aes(x = (get(i)), fill = Dropout)) +xlab(i)+geom_density(alpha = 0.3))
+print(ggplot(data = train_EDA, mapping = aes(x = get(i), fill =Dropout)) +xlab(i)+ ylab("perc") + geom_histogram(position="fill",alpha = 0.3))
+}
+
+```
+
+**Analysis and Main Results:**
+
+None of them are normally distributed, so Wilcoxon rank sum test was conducted and results show that BirthYear is significantly correlated with dropout while the correlation between HSDipYr,enrolled_age and dropout is not significant at 0.001 level
+
+So BirthYear will be involved and could be further selected in the model.
+
+**Involved variables:**
+
+-   BirthYear
+
+```{r}
+# df<-df[,-"enrolled_age","HSDipYr")]
+df <- df %>% select(-c(enrolled_age, HSDipYr))
+```
+
+#### NumColCredAcceptTransfer & NumColCredAttemptTransfer
+
+```{r}
+############  normal distribution test
+ks.test(scale(train_EDA$NumColCredAcceptTransfer),"pnorm")
+qqnorm(train_EDA$NumColCredAcceptTransfer)
+
+ks.test(scale(train_EDA$NumColCredAttemptTransfer),"pnorm")
+qqnorm(train_EDA$NumColCredAttemptTransfer)
+
+####  Mann-Whitney U test
+wilcox.test(train_EDA$NumColCredAttemptTransfer~train_EDA$Dropout)
+wilcox.test(train_EDA$NumColCredAttemptTransfer~train_EDA$Dropout)
+
+
+for(i in c("NumColCredAcceptTransfer","NumColCredAttemptTransfer")){
+print(ggplot(train_EDA, aes(x = (get(i)), fill = Dropout)) +xlab(i)+geom_density(alpha = 0.3))
+print(ggplot(data = train_EDA, mapping = aes(x = get(i), fill =Dropout)) +xlab(i)+ ylab("perc") + geom_histogram(position="fill",alpha = 0.3))
+}
+
+```
+
+**Analysis and Main Results:**
+
+Nither NumColCredAcceptTransfer nor NumColCredAttemptTransfer is normally distributed, so Wilcoxon rank sum test was conducted and results show that they are significantly correlated with dropout.
+
+So they will be involved and could be further selected in the model.
+
+**Involved variables:**
+
+-   NumColCredAcceptTransfer
+
+-   NumColCredAttemptTransfer
+
+#### Final Gpa and valid_transfer
+
+```{r}
+
+############  normal distribution test
+ks.test(train_EDA$final_GPA,"pnorm")
+qqnorm(train_EDA$final_GPA)
+
+# ks.test(train_EDA$valid_transfer,"pnorm")
+# qqnorm(train_EDA$valid_transfer)
+
+
+####  Mann-Whitney U test
+wilcox.test(train_EDA$final_GPA~train_EDA$Dropout)
+# wilcox.test(train_EDA$valid_transfer~train_EDA$Dropout)
+
+for(i in c("final_GPA")){
+print(ggplot(train_EDA, aes(x = (get(i)), fill = Dropout)) +xlab(i)+geom_density(alpha = 0.3))
+print(ggplot(data = train_EDA, mapping = aes(x = get(i), fill =Dropout)) +xlab(i)+ ylab("perc") + geom_histogram(position="fill",alpha = 0.3))
+}
+
+
+```
+
+**Analysis and Main Results:**
+
+Final Gpa is not normally distributed, so Wilcoxon rank sum test was conducted and result show that they Final Gpa is significantly correlated with dropout.
+
+So this will be involved and could be further selected in the model.
+
+**Involved variables:**
+
+-   Final_Gpa
+
+-   valid_transfer
+
+### 3.2.2 Interval & Ratio level variables（Discrete variable）:
+
+#### Variables overview：
+
+| Finance                      | Static                | Progress                 |
+|---------------------------|---------------------|------------------------|
+| Marital.Status               | BirthMonth            | CompleteDevMath /English |
+| Father.s.Highest.Grade.Level | Gender                | final_Complete1          |
+| Mother.s.Highest.Grade.Level | Race                  | first_term_Major1        |
+| Housing                      | EnrollmentStatus      | final_majorOne           |
+|                              | HighDeg               |                          |
+|                              | Math/EngPlacement     |                          |
+|                              | GatewayMath/EngStatus |                          |
+
+```{r}
+var <- list("Marital.Status", "Father.s.Highest.Grade.Level", "Mother.s.Highest.Grade.Level", "Housing", "Gender", "BirthMonth", "HSDipYr", "EnrollmentStatus", "HighDeg", "MathPlacement", "EngPlacement", "GatewayMathStatus", "GatewayEnglishStatus", "complete_DevMath", "complete_DevEnglish", "final_Complete1", "first_term_Major1", "final_majorOne", "race")
+
+drop <- c()
+for (i in var) {
+  count <- ggplot(data.frame(train_EDA[, i]), aes(x = train_EDA[, i], fill = train_EDA$Dropout)) + geom_bar(alpha = 0.3) + xlab(i)
+  perc <- ggplot(data.frame(train_EDA[, i]), aes(x = train_EDA[, i], fill = train_EDA$Dropout)) + geom_bar(alpha = 0.3, position = "fill") + xlab(i) + ylab("Perc")
+  print(ggarrange(count, perc, labels = c("count", "perc"), ncol = 1, nrow = 2))
+  
+  print(i)
+  assign(i , with(train_EDA, table(Dropout, get(i))))
+  table <- chisq.test(get(i))
+  print(chisq.test(get(i)))
+  
+  if(is.na(table$p.value)) {
+    next
+  }
+  if(table$p.value >0.001) {
+    drop <- append(drop, i)
+  }
+}
+print(drop)
+```
+
+**Analysis and Main Result**
+
+During the chi square test, there are 4 variables having p-value\>0.001, which means they are not significant at 0.001 level, so we have to delete them. These four are: `Mother.s.Highest.Grade.Level`, `Gender`, `BirthMonth`, and `Complete_Devmath`.
+
+**Involved variables:**
+
+-   Marital.Status,
+
+-   Father.s.Highest.Grade.Level,
+
+-   Housing,
+
+-   EnrollmentStatus,
+
+-   HighDeg,
+
+-   MathPlacement,
+
+-   EngPlacement,
+
+-   GatewayMathStatus,
+
+-   GatewayEnglishStatus,
+
+-   complete_DevEnglish,
+
+-   final_Complete1,
+
+-   first_term_Major1,
+
+-   final_majorOne,
+
+-   race
+
+## 3.3 Conlusions based on EDA
+
+### Involved variables:
+
+```{r}
+df<-df %>% select(-c(Mother.s.Highest.Grade.Level,Gender,BirthMonth))
+colnames(df)
+```
+
+```{r}
+train_AFTER_EDA <- left_join(dropput_train, df, by="StudentID")
+test_AFTER_EDA <- left_join(test_id, df, by="StudentID")
+train_AFTER_EDA$Dropout <- factor(train_EDA$Dropout)
+de<-which(is.na(train_AFTER_EDA$"BirthYear"),arr.ind = TRUE)
+train_AFTER_EDA<-train_AFTER_EDA[-de,]
+train_AFTER_EDA <- select(train_AFTER_EDA,-StudentID)
+
+
+# write.csv(train_AFTER_EDA,file="output data/train_AFTER_EDA.csv",row.names = FALSE)
+# write.csv(test_AFTER_EDA,file="output data/test_AFTER_EDA.csv",row.names = FALSE)
+# write.csv(df,file="output data/df_AFTER_EDA.csv",row.names = FALSE)
+```
+
+# 4.1 Decision Trees
+
+Decision trees used tree-based partitions to handle both continuous and categorical variables, so it can provide good classification for the data set we are working on. But regression tree can only work on ordered continuous value, which is limited.
+
+---
+title: "XGB MODEL(BASIC)"
+format: html
+editor: visual
+---
+
+```{r}
+trainEDA<-train_AFTER_EDA
+testEDA<-test_AFTER_EDA
+trainEDA$Dropout <- as.factor(trainEDA$Dropout)
+library(tidyverse)
+library(caret)
+set.seed(12345) 
+intrain <- createDataPartition(trainEDA$Dropout, p=0.75, list = FALSE)
+train <- trainEDA[intrain,]
+test <- trainEDA[-intrain,]
+
+trctrl <- trainControl(method = "cv",
+                       number = 10
+)
+
+tree_model <- train(Dropout ~ ., method='rpart', data=train, trControl = trctrl)
+print(tree_model$finalModel)
+tree_model$bestTune
+#Plot complexity parameter tuning runs
+plot(tree_model)
+
+#Plot the tree
+library(rpart.plot)
+rpart.plot(tree_model$finalModel)
+
+#Predict 
+predictions <- predict(tree_model, newdata = test, type='raw')
+#Model performance
+confusionMatrix(predictions,test$Dropout)
+# plot(forestImp)
+F_meas(predictions,test$Dropout)
+
+#To see the importance of the variables
+treeImp <- varImp(tree_model, scale = TRUE)
+treeImp
+plot(treeImp)
+
+summary(treeImp)
+precision(predictions,test$Dropout)
+recall(predictions,test$Dropout)
+```
+
+# 4.2 Logistic
+
+```{r}
+library(tidyverse)
+library(caret)
+library(ggplot2)
+library(GGally)
+library(ISLR2)
+library(pROC)
+library(car)
+
+set.seed(12345)
+train <- train_AFTER_EDA
+train$Dropout <- factor(ifelse(train$Dropout == 1, "Yes", "No"))
+train <- train %>% select(-c(StudentID,cohort))
+```
+
+## **call Confusion Matrix to get F1**
+
+```{r}
+call <- function(cm) {
+  print(cm$byClass["Sensitivity"])
+  print(cm$byClass["Specificity"])
+  print(cm$byClass["Precision"])
+  print(cm$byClass["Recall"])
+  print(cm$byClass["F1"])
+  print(cm$overall["Accuracy"])
+}
+```
+
+## set 10 cross validation and partition
+
+```{r}
+trctrl <- trainControl(method = "cv", number = 10, classProbs = T)
+intrain <- createDataPartition(train$Dropout, p = 0.75, list = FALSE)
+trainModel <- train[intrain, ]
+testModel <- train[-intrain, ]
+```
+
+## step 1 try logistic regression for all variables
+
+```{r}
+logicModel <- train(Dropout ~., 
+                    method = "glm", 
+                    preProcess = c("scale", "center"), 
+                    data = trainModel, 
+                    trControl = trctrl,
+                    family = binomial(link = "logit"))
+summary(logicModel)
+logic_pred <- predict(logicModel, newdata = testModel)
+cm <- confusionMatrix(logic_pred, testModel$Dropout)
+call(cm)
+```
+
+## step 2 delete some variables that can nearly linear
+
+Because there are many warnings in the console, so I decided to use some ways to eliminate some of the variables.
+
+```{r}
+colnames(trainModel[nearZeroVar(trainModel)])
+```
+
+By finding variables that may have var tends to have zero, we want to delete those variables and run again the model. We want to delete `total_Scholarship`, `total_Work_Study`.
+
+```{r}
+logicModel <- train(Dropout ~. -total_Scholarship -total_Work_Study , 
+                    method = "glm", 
+                    preProcess = c("scale", "center"), 
+                    data = trainModel, 
+                    trControl = trctrl,
+                    family = binomial(link = "logit"))
+summary(logicModel)
+logic_pred <- predict(logicModel, newdata = testModel)
+cm <- confusionMatrix(logic_pred, testModel$Dropout)
+call(cm)
+
+```
+
+We tried logistic regression as it is a classical way to find the probability that separate binary data. During the regression process, we have tried eliminate some of the variables that are nearly linear.
+
+We have also used `vif` to try to eliminate some variables that are variance-inflated, but the result is not good.
+
+We have also tried lasso and ridge to get rid of Multicollinearity, but it also seems to have a less F1.
+
+Performance metrics
+
+Accuracy for testing data: 0.8870757
+
+Precision for testing data: 0.8937917
+
+Recall rate for testing data: 0.9261031
+
+F1 score for testing data: 0.9096606
+
+# 4.3 Naive Bayes
+
+```{r}
+library(readr)
+library(tidyverse)
+library(caret)
+library(ggplot2)
+library(lattice)
+library(klaR)
+set.seed(12345)
+intrain <- createDataPartition(train_AFTER_EDA$Dropout,p=0.75,list = FALSE)
+train <- train_AFTER_EDA[intrain,]
+test <- train_AFTER_EDA[-intrain,]
+
+trctrl <- trainControl(method = "cv",
+                     number = 10,
+                     classProbs = FALSE,
+                     )
+train[sapply(train, is.character)] <- lapply(train[sapply(train, is.character)], 
+                                                           as.factor)
+# Naive Bayes
+nb_fit <- train(Dropout ~ Parent.Adjusted.Gross.Income+MathPlacement+EngPlacement+GatewayMathStatus+GatewayEnglishStatus+final_GPA+total_Loan+total_Scholarship+total_Work_Study+total_Grant+race+overall_income, data = train, method = "nb", 
+                trControl=trctrl)
+nb_fit
+
+test$Dropout <- factor(test$Dropout)
+class_prob <- predict(nb_fit, newdata = test, type="prob")
+class_prob1 <- predict(nb_fit, newdata = test, type="raw")
+#Report Accuracy, Precision, Recall rate, and F measure
+confusionMatrix(class_prob1,test$Dropout)
+F_meas(class_prob1,test$Dropout)
+
+precision(class_prob1,test$Dropout)
+recall(class_prob1,test$Dropout)
+```
+
+### Performance Metrics
+
+Accuracy for testing data: 0.7428
+
+Sensitivity for testing data: 0.9048
+
+Specificity for testing data: 0.4852
+
+Precision for testing data: 0.7364777
+
+Recall rate for testing data: 0.9048379
+
+F-measure score for testing data: 0.8120229
+
+### Why Use Naive Bayes Model & Conclusion
+
+-   It is good at solving classification problems, mainly used for a high-dimensional training dataset
+
+-   It handles both discrete and continuous data, and highly scalable with the number of predictors and data points
+
+# 4.4 Random Forest
+
+Similar mechanism with decision tree to provide a good classification for continuous and categorical variables. But the random forest algorithm performs better in accuracy when predicting outcomes than the decision tree algorithm.
+
+```{r}
+#Random Forest
+library(caret)
+set.seed(12345) 
+intrain <- createDataPartition(train_AFTER_EDA$Dropout,p=0.50,list = FALSE)
+train1 <- train_AFTER_EDA[intrain,]
+test1 <- train_AFTER_EDA[-intrain,]
+#Cross validation
+trctrl <- trainControl(method = "cv", number = 10)
+
+forest_fit <- train(Dropout ~., data = train1, method = "rf",importance = T,
+                    trControl=trctrl)
+#To see model details
+forest_fit
+#To see the tuned mtry parameter.  Mtry is the number of randomly selected predictors
+forest_fit$bestTune
+#Plot mtry parameter tuning runs
+plot(forest_fit)
+#Predict
+predictionsf <- predict(forest_fit, newdata = test1)
+
+#predictionsf <- predict(forest_fit, newdata = testEDA)
+#Calculate performance measures
+#postResample(forest_fit,train1$Dropout)
+#To see the importance of the variables
+forestImp <- varImp(forest_fit)
+forestImp
+plot(forestImp)
+
+
+
+#predictionsf <- predict(forest_fit, newdata = testEDA)
+#Calculate performance measures
+#postResample(forest_fit,testEDA$Dropout)
+
+F_meas(predictionsf,test1$Dropout)
+confusionMatrix(predictionsf,test1$Dropout)
+
+```
+
+# 4.5 SVM
+
+```{r}
+library(caret)
+set.seed(12345)
+
+#Create traning test split
+intrain <- createDataPartition(train_AFTER_EDA$Dropout,p=0.75,list = FALSE)
+train1 <- train_AFTER_EDA[intrain,]
+test1 <- train_AFTER_EDA[-intrain,]
+
+#Create cross validation
+trctrl <- trainControl(method = "cv", number = 10)
+
+call <- function(cm) {
+print(cm$byClass["Sensitivity"])
+print(cm$byClass["Specificity"])
+print(cm$byClass["Precision"])
+print(cm$byClass["Recall"])
+print(cm$byClass["F1"])
+print(cm$overall["Accuracy"])
+}
+
+# Linear kernel
+modSVMFit_linear <- train(Dropout ~ .,method="svmLinear2", trControl=trctrl,data=train1)
+#See model fit details
+modSVMFit_linear$finalModel
+modSVMFit_linear$bestTune
+
+SVMpredict_linear <- predict(modSVMFit_linear,test1)
+confusionMatrix(SVMpredict_linear,test1$Dropout)
+SVMpredict_linear_matrix <- confusionMatrix(SVMpredict_linear,test1$Dropout)
+F_meas(SVMpredict_linear,test1$Dropout)
+call(SVMpredict_linear_matrix)
+
+#Polynomial
+#Use a tuning grid to tune parameters.  Need one column for each parameter that can be tuned
+modSVMFit_polynomial <- train(Dropout ~ .,method="svmPoly",trControl=trctrl,data=train1)
+#See model fit details
+modSVMFit_polynomial$finalModel
+#The polynomial kernel is defined as (scale * crossprod(x, y) + offset)^degree
+#See the tuning parametrs used (cost C, Scale of the kernel function)
+modSVMFit_polynomial$bestTune
+
+#Predict test dataset
+SVMpredict_polynomial <- predict(modSVMFit_polynomial,test1)
+confusionMatrix(SVMpredict_polynomial,test1$Dropout)
+SVMpredict_polynomial_matrix <- confusionMatrix(SVMpredict_polynomial,test1$Dropout)
+F_meas(SVMpredict_polynomial,test1$Dropout)
+call(SVMpredict_polynomial_matrix)
+
+#Radial Kernel
+modSVMFit_Radial <- train(Dropout ~ .,method="svmRadial",sigma =.2,trControl=trctrl,data=train1)
+#See model fit details
+modSVMFit_Radial$finalModel
+#See the tuning parameters used (cost C, and sigma of the radial kernel function)
+modSVMFit_Radial$bestTune
+
+#Predict test dataset
+SVMpredict_Radial <- predict(modSVMFit_Radial,test1)
+confusionMatrix(SVMpredict_Radial,test1$Dropout)
+SVMpredict_Radial_matrix <- confusionMatrix(SVMpredict_Radial,test1$Dropout)
+call(SVMpredict_Radial_matrix)
+```
+
+# 4.6 XGBoost model
+
+**Library**
+
+```{r}
+library(xgboost)
+library(tidyr)
+library(Matrix)
+library(mlr)
+library(Ckmeans.1d.dp)
+library(ISLR2)
+library(pROC)
+```
+
+**read data**
+
+```{r}
+# DF_train<- train_AFTER_EDA
+# DF_test<- test_AFTER_EDA
+# 
+# #DF_train$Dropout<-factor(DF$Dropout,levels=c(0,1),labels=("no","yes"))
+# DF_train$Dropout <- factor(DF_train$Dropout)
+# 
+# DF_train$Marital.Status <- factor(DF_train$Marital.Status)
+# DF_train$Father.s.Highest.Grade.Level <- factor(DF_train$Father.s.Highest.Grade.Level)
+# DF_train$Housing <- factor(DF_train$Housing)
+# DF_train$race <- factor(DF_train$race)
+# 
+# DF_test$Marital.Status <- factor(DF_test$Marital.Status)
+# DF_test$Father.s.Highest.Grade.Level <- factor(DF_test$Father.s.Highest.Grade.Level)
+# DF_test$Housing <- factor(DF_test$Housing)
+# DF_test$race <- factor(DF_test$race)
+# 
+# #DF_train$Dropout <- factor(ifelse(DF_train$Dropout == 1, "Yes", "No"))
+# # DF_train<-DF_train%>%select(-c(StudentID,cohort))
+# # DF_test<-DF_test%>%select(-c(StudentID,cohort))
+# 
+# DF_train <- select(DF_train,-c(cohort,RegistrationDate,final_Complete1,final_majorOne,Parent.Adjusted.Gross.Income,Adjusted.Gross.Income))
+# 
+# DF_test <- select(DF_test,-c(cohort,RegistrationDate,final_Complete1,final_majorOne,Parent.Adjusted.Gross.Income,Adjusted.Gross.Income))
+
+```
+
+**Split into training and testing**
+
+```{r}
+# set.seed(12345)
+# intrain <- createDataPartition(DF_train$Dropout,p=0.75,list = FALSE)
+# train1 <- DF_train[intrain,]
+# test1 <- DF_train[-intrain,]
+# trctrl <- trainControl(method = "cv", number = 10)
+```
+
+**Data preprocess**
+
+The xgboost function in the xgboost package requires a specific data format (xgb.DMatrix). Before using the xgboost function, we need to preprocess the dataset.
+
+```{r}
+# 
+# ###############################training set
+# #Convert (independent variable) in trainset to matrix
+# traindata1<-data.matrix(train1 %>% select(-c(Dropout)))
+# #Use the Matrix function to set the sparse parameter to TRUE and convert it to a sparse matrix
+# traindata2 <-Matrix(traindata1,sparse=T) 
+# 
+# #Convert the dependent variable to numeric type.-1 is because we want to count from 0
+# train_y <-as.numeric(train1[,"Dropout"])-1 
+# #Splice the independent variable and dependent variable into a list
+# traindata <-list(data=traindata2,label=train_y)
+# 
+# #The xgb.DMatrix required by the model is constructed from a sparse matrix
+# dtrain <-xgb.DMatrix(data=traindata$data,label=traindata$label)
+# 
+# ###############################testing set
+# #Convert (independent variable) in testset to matrix
+# testdata1<-data.matrix(test1 %>% select(-c(Dropout)))
+# #Use the Matrix function to set the sparse parameter to TRUE and convert it to a sparse matrix
+# testdata2 <-Matrix(testdata1,sparse=T) 
+# 
+# #Convert the dependent variable to numeric type.-1 is because we want to count from 0
+# test_y <-as.numeric(test1[,"Dropout"])-1 
+# #Splice the independent variable and dependent variable into a list
+# testdata <-list(data=testdata2,label=test_y)
+# 
+# #The xgb.DMatrix required by the model is constructed from a sparse matrix
+# dtest <-xgb.DMatrix(data=testdata$data,label=testdata$label)
+# 
+# ###############################final test data
+# #Convert (independent variable) in final test to matrix
+# final_test<-data.matrix(DF_test)
+# #Use the Matrix function to set the sparse parameter to TRUE and convert it to a sparse matrix
+# final_test <-Matrix(final_test,sparse=T) 
+# 
+# #The xgb.DMatrix required by the model is constructed from a sparse matrix
+# final_test <-xgb.DMatrix(final_test)
+
+```
+
+**fitting model and check performance**
+
+```{r}
+# #fitting the xgboost model
+# xgb <-xgboost(data=dtrain,max_depth=6,eta=0.3,
+# nthread = 2,objective='binary:logistic',nround=25)
+# 
+# importance <- xgb.importance(model = xgb) 
+# xgb.ggplot.importance(importance)
+# 
+# cv<-xgb.cv(data=dtrain,max_depth=6,eta=0.3,nfold = 5,metrics = list("rmse","auc"),nthread = 2,objective='binary:logistic',nround=25)
+# 
+# #Make predictions on the test set
+# pre_xgb=round(predict(xgb,newdata=dtest)) 
+# pre_xgb_final=round(predict(xgb,newdata=final_test)) 
+# 
+# #Output confusion matrix
+# pre_xgb<-as.factor(pre_xgb)
+# cm<-confusionMatrix(pre_xgb,test1$Dropout,positive="0")
+# 
+# call <- function(cm) { 
+#  print(cm$byClass["Sensitivity"]) 
+#  print(cm$byClass["Specificity"]) 
+#  print(cm$byClass["Precision"]) 
+#  print(cm$byClass["Recall"]) 
+#  print(cm$byClass["F1"]) 
+#  print(cm$overall["Accuracy"]) 
+#  } 
+# 
+# call(cm)
+# 
+# #plot ROC curve and AUC value
+# xgboost_roc<-roc(test1$Dropout,as.numeric(pre_xgb))
+# plot(xgboost_roc,print.auc=TRUE,auc.polygon=TRUE,grid=c(0.1,0.2),grid.col=c("green","red"),max.auc.polygon=TRUE,auc.polygon.col="skyblue",print.thres=TRUE,main='xgboost')
+
+```
+
+**Out put final prediction**
+
+`{# {r} # df_test_clean <- read.csv("/Users/xinchangliu/Dropbox/Mac/Desktop/test_AFTER_EDA.csv") # test_pred <- pre_xgb_final # df_test_clean <- df_test_clean %>%  #   mutate(Dropout = test_pred)  #    #    #    # submission <- data.frame( #      StudentID = df_test_clean$StudentID,  #      Dropout = df_test_clean$Dropout #  ) #  # #write.csv(submission,file="output data/submission_xgb.csv",row.names = FALSE)`
+
+**conclusion:**
+
+XGBoost is an ensemble machine learning algorithms under the [Gradient Boosting](https://en.wikipedia.org/wiki/Gradient_boosting) framework. XGBoost provides a parallel tree boosting (also known as GBDT, GBM) that solve many data science problems(classification and regression) in a fast and accurate way and has been widely used in data competitions such as kaggel in recent years.
+
+In this work, XGBoost was used to predict dropout, 25 variables are used to fit the model. For parameters, max_depth=6,eta=0.3,nthread = 2,objective='binary:logistic',nround=25 was used in the model and finally get an AUC with 0.846 and F1 with0.894. The model also ranked the top importance of variables which are cohort year final gpa, total grant, total loan, NumColCredAcceptTransfer.
